@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import pwd
 import sys
 import time
 import os
@@ -14,18 +15,51 @@ import threading
 import math
 import atexit
 import save_queue
-from imutils.video import VideoStream
 
 gi.require_version('Aravis', '0.4')
 from gi.repository import Aravis
 
 import gps_poller
 import weather_poller
+import webcam_poller
+
+uid = pwd.getpwnam('odroid').pw_uid
+gid = pwd.getpwnam('odroid').pw_gid
+
+
+def file_print(message):
+	print(message)
+	logfile.write("%s\n" % message)
+
+
+print ("Finding results directory")
+output_dir = os.path.expanduser("/home/odroid/Desktop/results_%s" % datetime.datetime.now().strftime('%y%m%d-%H%M%S'))
+if not os.path.isdir(output_dir):
+	print ("Creating results directory %s" % output_dir)
+	os.makedirs(output_dir)
+	os.chown(output_dir, uid, gid) 
+else:
+	print ("Found results directory")
+
+
+logfilename = "%s/log.txt" % output_dir
+logfile = open(logfilename, "a")
+os.chown(logfilename, uid, gid) 
+file_print("Opening log file")
+
+def closefile():
+	file_print("Closing log file")
+	logfile.close()
+
+atexit.register(closefile)
+
+
+
 
 # load in the custom scripts
 import lcd
 def lcd_close_board():
-	print("Closing LCDs")
+	file_print("Closing LCDs")
 	lcd.lcd_clear()
 	for index in range(0,7):
 		lcd.lcd_led_set(index, 0)
@@ -39,102 +73,120 @@ def disk_free_bytes():
 
 	return free
 
+	
 
-
-uid = int(os.environ.get('SUDO_UID'))
-gid = int(os.environ.get('SUDO_GID'))
 
 
 # set up LCD
-print ("Setting up LCD")
+file_print ("Setting up LCD")
 lcd.lcd_setup()
-lcd.lcd_update("Thermal control",0)
+lcd.lcd_update("%.2f GB free" % (float(disk_free_bytes()) / 1024 / 1024 / 1024),0)
+
+
+
+
+# get GPS going 
+file_print ("Starting GPS")
+gpsp = gps_poller.GpsPoller() # create the thread
+gpsp.daemon = True
+gpsp.start() # start it up
+
+file_print ("Starting weather board")
+wp = weather_poller.WxPoller() # create the thread
+wp.daemon = True
+wp.start() # start it up
+
+
+
+file_print("Waiting for GPS")
+for i in range(0,20):
+	lcd.lcd_led_set(i % 7,1)
+	time.sleep(0.5)
+	lcd.lcd_led_set(i % 7,0)
+	time.sleep(0.5)
+
+file_print("Trying to set time from GPS")
+
+if gps_poller.gpsd.utc != None and gps_poller.gpsd.utc != '':
+	gpstime = gps_poller.gpsd.utc[0:4] + gps_poller.gpsd.utc[5:7] + gps_poller.gpsd.utc[8:10] + ' ' + gps_poller.gpsd.utc[11:13] + gps_poller.gpsd.utc[13:19]
+	file_print("Setting time to GPS time %s" % gpstime)
+	os.system('sudo date -u --set="%s"' % gpstime)
+	file_print("Time has been set")
+	lcd.lcd_update(gpstime, 0)
+else:
+	file_print("GPS time not available")
+	lcd.lcd_update("No GPS time", 0)
 
 # set up web cam
-print("Finding visible camera")
+file_print("Finding visible camera")
 #camera_visible = cv2.VideoCapture(0)
 #camera_visible.set(cv2.cv.CV_CAP_PROP_FRAME_HEIGHT,720)
 #camera_visible.set(cv2.cv.CV_CAP_PROP_FRAME_WIDTH,1280)
-vs = None
+
 try:
-	vs = VideoStream(0,resolution=(1280,720),framerate=24)
-	vs.start()
-	print("Visible camera setup complete")
+	wcp = webcam_poller.WebcamPoller()
+	wcp.daemon = True
+	wcp.start() # start it up
+	file_print("Visible camera setup complete")
 except:
-	print("No visible camera found, exiting")
+	file_print("No visible camera found, exiting")
 	exit()
 
 
-print "Finding results directory"
-output_dir = os.path.expanduser("~/Desktop/results_%s" % datetime.datetime.now().strftime('%y%m%d-%H%M%S'))
-if not os.path.isdir(output_dir):
-	print "Creating results directory %s" % output_dir
-	os.makedirs(output_dir)
-	os.chown(output_dir, uid, gid)
-else:
-	print ("Found results directory")
 
-print "Finding infrared camera"
+
+
+file_print ("Finding infrared camera")
 try:
 	if len(sys.argv) > 1:
 		camera = Aravis.Camera.new (sys.argv[1])
 	else:
 		camera = Aravis.Camera.new (None)
 except:
-	print ("No camera found")
+	file_print ("No camera found")
 	exit ()
 
 payload = camera.get_payload ()
 device = camera.get_device ()
 
-print "Initializing image capture settings"
+file_print ("Initializing image capture settings")
 device.set_integer_feature_value("IRFormat", 2) # 0 = signal; 2 = 0.01K Tlinear
 device.set_integer_feature_value("IRFrameRate", 2) # 0 = 60 Hz, 1 = 30 Hz, 2 = 15 Hz
 camera.set_region (0,0,640,480)
 camera.set_frame_rate (10)
 camera.set_pixel_format (Aravis.PIXEL_FORMAT_MONO_16)
 [x,y,width,height] = camera.get_region ()
-num_buffers = 5;
+num_buffers = 1;
 
-print "----------------------------"
-print "Camera vendor : %s" %(camera.get_vendor_name ())
-print "Camera model  : %s" %(camera.get_model_name ())
-print "Camera id     : %s" %(camera.get_device_id ())
-print "ROI           : %dx%d at %d,%d" %(width, height, x, y)
-print "Payload       : %d" %(payload)
-print "Pixel format  : %s" %(camera.get_pixel_format_as_string ())
-print "----------------------------"
+file_print ("----------------------------")
+file_print ("Camera vendor : %s" %(camera.get_vendor_name ()))
+file_print ("Camera model  : %s" %(camera.get_model_name ()))
+file_print ("Camera id     : %s" %(camera.get_device_id ()))
+file_print ("ROI           : %dx%d at %d,%d" %(width, height, x, y))
+file_print ("Payload       : %d" %(payload))
+file_print ("Pixel format  : %s" %(camera.get_pixel_format_as_string ()))
+file_print ("----------------------------")
 
-print "Start thermal stream"
+file_print ("Start thermal stream")
 stream = camera.create_stream (None, None)
 
-print "Create thermal buffers"
+file_print ("Create thermal buffers")
 for i in range(0,num_buffers):
 	stream.push_buffer (Aravis.Buffer.new_allocate (payload))
 
-print "Start thermal acquisition"
+file_print( "Start thermal acquisition")
 camera.start_acquisition ()
 
-print "Creating save queue"
+file_print ("Creating save queue")
 save_queue.initialize_queue()
 def queue_close():
-	print("Waiting for last images to save")
+	file_print("Waiting for last images to save")
 	save_queue.save_queue.join()
-	print("All images saved")
+	file_print("All images saved")
 
 atexit.register(queue_close)
 
 
-# get GPS going 
-print "Starting GPS"
-gpsp = gps_poller.GpsPoller() # create the thread
-gpsp.daemon = True
-gpsp.start() # start it up
-
-print "Starting weather board"
-wp = weather_poller.WxPoller() # create the thread
-wp.daemon = True
-wp.start() # start it up
 
 
 # set all LEDs high to verify
@@ -148,7 +200,7 @@ lcd.lcd_update("All systems OK",1)
 
 
 
-print "Entering main loop"
+file_print( "Entering main loop")
 counter = 0
 time_start = time.time()
 stats = {}
@@ -159,17 +211,19 @@ program_throttled = True
 
 #while counter < 100:
 while(program_running==True):
-	if counter % 10 == 0:
-		(b_left, b_right) = lcd.lcd_check_buttons(50)
-		if b_left == True:
-			program_throttled = not program_throttled
-			print("Left button pressed - throttle state now %d" % program_throttled)
-		if b_right == True:
-			program_paused = not program_paused
-			print("Right button pressed - pause state now %d" % program_paused)
+
+	(b_left, b_right) = lcd.lcd_check_buttons(50)
+	if b_left == True:
+		program_throttled = not program_throttled
+		file_print("Left button pressed - throttle state now %d" % program_throttled)
+	if b_right == True:
+		program_paused = not program_paused
+		file_print("Right button pressed - pause state now %d" % program_paused)
+	if b_right == True and b_left == True:
+		file_print("Both buttons pressed - exiting and shutting down")
+		os.system("sudo shutdown now -h")
 
 	if program_throttled==True:
-		print("Throttling for 1 second")
 		for i in range(1,5):
 			time.sleep(0.25)				
 			lcd.lcd_led_set(6,i%2)
@@ -177,33 +231,32 @@ while(program_running==True):
 		lcd.lcd_led_set(6,1)
 
 	if program_paused==True:
-		print("Paused")
 		lcd.lcd_update("Paused",0)
 		time.sleep(1)
 	else:	
 		if counter % 10 == 0:
 			fps = counter / (time.time() - time_start)
-			print("**** FPS = %.3f" % fps)
+			file_print("**** FPS = %.3f" % fps)
 
 			freedisk_gb = float(disk_free_bytes()) / 1024 / 1024 / 1024
 			lcd.lcd_update("Diskfree: %.2f GB" % freedisk_gb, 0)
-			print("**** Free: %.2f GB" % freedisk_gb)
+			file_print("**** Free: %.2f GB" % freedisk_gb)
 
 			if freedisk_gb < 0.5:
-				print("Exiting, disk full")
+				file_print("Exiting, disk full")
 				exit()
 
 		if counter % 500 == 0:
-			print('Non-uniformity correction')
+			file_print('Non-uniformity correction')
 			device.execute_command("NUCAction")
 			#time.sleep(0.5)
 
 		if counter % 1000 == 0:
-			print('Autofocus')
+			file_print('Autofocus')
 			device.execute_command("AutoFocus")
 			#time.sleep(3)
 			distance = device.get_float_feature_value("FocusDistance")
-			print("Setting object distance to %f meters" % distance)
+			file_print("Setting object distance to %f meters" % distance)
 			device.set_float_feature_value("ObjectDistance", distance)
 
 		buffer = stream.pop_buffer ()
@@ -261,37 +314,37 @@ while(program_running==True):
 		stats['Date'] = datetime.datetime.now().strftime('%y%m%d-%H%M%S')
 
 
-		print("**** Lat: %.3f Lon: %.3f Numsats: %d" % (stats["gps_latitude"], stats['gps_longitude'], stats['gps_num_satellites']))
+		file_print("**** Lat: %.3f Lon: %.3f Numsats: %d" % (stats["gps_latitude"], stats['gps_longitude'], stats['gps_num_satellites']))
 
 		if counter % 10 == 0:
-			print("Adjusting camera settings")
+			file_print("Adjusting camera settings")
 			stat_atm_temp = float(stats['wx_temp_air_c']) + 273.15
 			stat_atm_rh  = float(stats['wx_rel_hum_pct'])
 			device.set_float_feature_value("AtmosphericTemperature",stat_atm_temp)
 			device.set_float_feature_value("RelativeHumidity",stat_atm_rh)
 
 		fileprefix = '%s/out_%s_%d' % (output_dir, stats['Date'], counter)
-		print("Setting output location %s" % fileprefix)
+		file_print("Setting output location %s" % fileprefix)
 		lcd.lcd_update(stats['Date'], 0)
 
 		if buffer:
 			lcd.lcd_led_set(0,1)
-			print('Reading infrared image data')
+			file_print('Reading infrared image data')
 			#img = numpy.fromstring(ctypes.string_at(buffer.data_address(), buffer.size), dtype=numpy.uint16).reshape(480,640)
 			data_infrared = numpy.ctypeslib.as_array(ctypes.cast(buffer.get_data(), ctypes.POINTER(ctypes.c_uint16)), (buffer.get_image_height(), buffer.get_image_width()))
 			data_infrared = data_infrared.copy()
 
-			print('Reading visible image data')
+			file_print('Reading visible image data')
 			#ret,image_visible = camera_visible.read()
 			#image_visible = image_visible.copy()
-			image_visible = vs.read()		
+			image_visible = wcp.im.copy()		
 
-			if vs.stream.grabbed==True:
+			if wcp.ret==True:
 				lcd.lcd_led_set(3,1)
 			else:
 				lcd.lcd_led_set(3,0)
 
-			print("Sending data to queue")
+			file_print("Sending data to queue")
 			save_queue.save_queue.put( (data_infrared, image_visible, fileprefix, uid, gid) )
 
 			writer = csv.writer(open(fileprefix + '-stats.csv', 'w'),delimiter=',')
@@ -299,17 +352,17 @@ while(program_running==True):
 			writer.writerow(stats.values())
 			os.chown(fileprefix + "-stats.csv", uid, gid)
 
-			print("Summarizing data")
+			file_print("Summarizing data")
 			stat_mean = float(data_infrared.mean()) / 100.0 - 273.15 
-			print("Mean value = %.3f" % stat_mean)
+			file_print("Mean value = %.3f" % stat_mean)
 			lcd.lcd_update("%d %.1f %.2f" % (counter, stat_mean, freedisk_gb),1)
 
 			stream.push_buffer(buffer)
 		else:
 			lcd.lcd_led_set(0,0)
-			print('No buffer obtained')
+			file_print('No buffer obtained')
 
 		counter = counter + 1
 
-print("Stopping acquisition")
+file_print("Stopping acquisition")
 camera.stop_acquisition()

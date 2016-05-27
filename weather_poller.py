@@ -3,7 +3,7 @@ import threading
 import subprocess
 
 def check_weather():
-	wx = subprocess.check_output('c_weather/weather_board')
+	wx = subprocess.check_output('/home/odroid/Desktop/control/c_weather/weather_board')
 	if "ERROR" in wx:
 		status = 0
 		wx_split = [float('nan')] * 6
